@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import db from "./db.js";
+import { detectImageType, getImageSize } from "./image-utils.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -27,6 +28,16 @@ const frontendDistPath = path.resolve(
   "../../frontend/dist"
 );
 const productColumns = "pid, pname, description, price, qty";
+const productSelect = `
+  SELECT p.pid, p.pname, p.description, p.price, p.qty, pi.updated_at AS image_updated_at
+  FROM public.products p
+  LEFT JOIN public.product_images pi ON pi.pid = p.pid
+`;
+const allowedImageMimeTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+const imageBodyParser = express.raw({
+  type: ["image/jpeg", "image/png", "image/webp"],
+  limit: "200kb"
+});
 const userColumns = "uid, uname, email";
 const accountColumns = "account_id, name, email, role, created_at";
 const qualifiedAccountColumns = `a.${accountColumns.split(", ").join(", a.")}`;
@@ -37,8 +48,13 @@ const orderSelect = `
   JOIN public.products p ON p.pid = o.pid
 `;
 
-if (!fs.existsSync(path.join(frontendDistPath, "index.html"))) {
-  throw new Error("Frontend build not found. Run `cd frontend && npm run build` first.");
+const frontendIndexPath = path.join(frontendDistPath, "index.html");
+const frontendBuilt = fs.existsSync(frontendIndexPath);
+if (!frontendBuilt) {
+  console.warn(
+    "Frontend build not found (frontend/dist/index.html). The API will run without serving the UI. "
+    + "Run `cd frontend && npm run build` when the front end is ready."
+  );
 }
 
 app.use(cors({ origin: frontendOrigin, credentials: true }));
@@ -101,6 +117,31 @@ function publicAccount(account) {
     role: account.role,
     created_at: account.created_at
   };
+}
+
+function publicProduct(row) {
+  return {
+    pid: row.pid,
+    pname: row.pname,
+    description: row.description,
+    price: row.price,
+    qty: row.qty,
+    image_updated_at: row.image_updated_at
+      ? new Date(row.image_updated_at).toISOString()
+      : null
+  };
+}
+
+function normalizeContentType(header) {
+  if (typeof header !== "string" || !header.trim()) {
+    return null;
+  }
+  return header.split(";")[0].trim().toLowerCase();
+}
+
+function productImageETag(pid, updatedAt) {
+  const stamp = updatedAt instanceof Date ? updatedAt.toISOString() : String(updatedAt);
+  return `"${pid}-${stamp}"`;
 }
 
 const requireSession = asyncRoute(async (req, res, next) => {
@@ -301,7 +342,7 @@ async function updateProduct(id, body) {
   const input = productInput(body, true);
   if (!Object.keys(input).length) throw apiError(400, "Provide at least one product field to update");
   const current = await findRow(
-    `SELECT ${productColumns} FROM public.products WHERE pid = $1`,
+    `${productSelect} WHERE p.pid = $1`,
     [id],
     "Product"
   );
@@ -404,16 +445,100 @@ app.delete("/api/admin/accounts/:id", asyncRoute(async (req, res) => {
 }));
 
 app.get("/api/get_products", asyncRoute(async (_req, res) => {
-  const { rows } = await query(`SELECT ${productColumns} FROM public.products ORDER BY pid DESC`);
-  res.json(rows);
+  const { rows } = await query(`${productSelect} ORDER BY p.pid DESC`);
+  res.json(rows.map(publicProduct));
 }));
 app.get("/api/get_product/:id", asyncRoute(async (req, res) => {
   const row = await findRow(
-    `SELECT ${productColumns} FROM public.products WHERE pid = $1`,
+    `${productSelect} WHERE p.pid = $1`,
     [positiveId(req.params.id)],
     "Product"
   );
-  res.json(row);
+  res.json(publicProduct(row));
+}));
+
+app.put(
+  "/api/products/:pid/image",
+  imageBodyParser,
+  asyncRoute(async (req, res) => {
+    const pid = positiveId(req.params.pid);
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+
+    const contentType = normalizeContentType(req.headers["content-type"]);
+    if (!contentType || !allowedImageMimeTypes.has(contentType)) {
+      throw apiError(415, "Content-Type must be image/jpeg, image/png, or image/webp");
+    }
+
+    if (!body.length) {
+      throw apiError(400, "Request body is empty");
+    }
+
+    const { rowCount: productExists } = await query("SELECT 1 FROM public.products WHERE pid = $1", [pid]);
+    if (!productExists) {
+      throw apiError(404, "Product not found");
+    }
+
+    const detected = detectImageType(body);
+    if (!detected || detected !== contentType) {
+      throw apiError(415, "Image bytes do not match the declared Content-Type");
+    }
+
+    const size = getImageSize(body, contentType);
+    if (!size || size.width !== 200 || size.height !== 200) {
+      throw apiError(400, "Image must be exactly 200 x 200 pixels");
+    }
+
+    const { rows } = await query(
+      `INSERT INTO public.product_images (pid, mime, bytes, data, updated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (pid) DO UPDATE
+       SET mime = EXCLUDED.mime, bytes = EXCLUDED.bytes, data = EXCLUDED.data, updated_at = now()
+       RETURNING pid, mime, bytes, updated_at`,
+      [pid, contentType, body.length, body]
+    );
+    const saved = rows[0];
+    res.json({
+      pid: saved.pid,
+      mime: saved.mime,
+      bytes: saved.bytes,
+      updated_at: new Date(saved.updated_at).toISOString()
+    });
+  })
+);
+
+app.get("/api/products/:pid/image", asyncRoute(async (req, res) => {
+  const pid = positiveId(req.params.pid);
+  const { rows } = await query(
+    "SELECT mime, bytes, data, updated_at FROM public.product_images WHERE pid = $1",
+    [pid]
+  );
+  const image = rows[0];
+  if (!image) {
+    throw apiError(404, "Product image not found");
+  }
+
+  const etag = productImageETag(pid, image.updated_at);
+  res.setHeader("ETag", etag);
+  res.setHeader("Cache-Control", "private, max-age=86400");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Content-Type", image.mime);
+  res.setHeader("Content-Length", String(image.bytes));
+
+  const ifNoneMatch = req.headers["if-none-match"];
+  if (ifNoneMatch === etag) {
+    return res.status(304).end();
+  }
+
+  res.send(image.data);
+}));
+
+app.delete("/api/products/:pid/image", asyncRoute(async (req, res) => {
+  const pid = positiveId(req.params.pid);
+  const { rowCount } = await query("DELETE FROM public.product_images WHERE pid = $1", [pid]);
+  if (!rowCount) {
+    throw apiError(404, "Product image not found");
+  }
+  res.status(204).end();
 }));
 app.post("/api/add_product", asyncRoute(async (req, res) => {
   const product = productInput(req.body);
@@ -556,9 +681,18 @@ app.put("/api/update_order/:id", asyncRoute(async (req, res) => {
 }));
 
 app.use("/api", (_req, res) => res.status(404).json({ error: "API endpoint not found" }));
-app.use(express.static(frontendDistPath));
-app.get("*", (_req, res) => res.sendFile(path.join(frontendDistPath, "index.html")));
+if (frontendBuilt) {
+  app.use(express.static(frontendDistPath));
+  app.get("*", (_req, res) => res.sendFile(frontendIndexPath));
+} else {
+  app.get("/", (_req, res) => {
+    res.json({ message: "CRUD API is running. Build the Vue front end to serve the UI from this server." });
+  });
+}
 app.use((error, _req, res, _next) => {
+  if (error.type === "entity.too.large") {
+    return res.status(413).json({ error: "Image must be 200 KB or smaller" });
+  }
   if (error.code === "23505") {
     return res.status(409).json({ error: "A record with this email already exists" });
   }

@@ -1,12 +1,14 @@
 import "dotenv/config";
 import bcrypt from "bcryptjs";
-import { createInterface, emitKeypressEvents } from "node:readline";
+import { emitKeypressEvents } from "node:readline";
+import { createInterface } from "node:readline/promises";
 import db from "./db.js";
 
 async function ask(question) {
   const prompt = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    return (await prompt.question(question)).trim();
+    const answer = await prompt.question(question);
+    return answer.trim();
   } finally {
     prompt.close();
   }

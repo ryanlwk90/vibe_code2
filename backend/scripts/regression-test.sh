@@ -13,6 +13,14 @@ INITIAL_ACCOUNT_COUNT=""
 ADMIN_JAR=""
 READER_JAR=""
 RESPONSE_FILE=""
+SCRIPT_DIR=""
+FIXTURE_200=""
+FIXTURE_100=""
+TEMP_HEADERS=""
+TEMP_IMAGE_BODY=""
+TEMP_OVERSIZE=""
+TEMP_PLAIN_FILE=""
+IMAGE_ETAG=""
 
 if [ -z "$ADMIN_EMAIL" ] || [ -z "$ADMIN_PASSWORD" ]; then
   echo "Set ADMIN_EMAIL and ADMIN_PASSWORD in the environment, then run this script again."
@@ -73,6 +81,46 @@ req() {
   BODY=$(cat "$RESPONSE_FILE")
 }
 
+req_binary() {
+  local method="$1"
+  local path="$2"
+  local file="$3"
+  local content_type="$4"
+  local jar="$5"
+  local url="${BASE}${path}"
+  local curl_args=( -sS -w "%{http_code}" -o "$RESPONSE_FILE" -X "$method" "$url" )
+
+  if [ -n "$jar" ]; then
+    curl_args+=( -b "$jar" -c "$jar" )
+  fi
+
+  if [ -n "$file" ]; then
+    curl_args+=( -H "Content-Type: ${content_type}" --data-binary @"$file" )
+  fi
+
+  CODE=$(curl "${curl_args[@]}")
+  BODY=$(cat "$RESPONSE_FILE")
+}
+
+req_image_get() {
+  local path="$1"
+  local jar="$2"
+  local extra_header="$3"
+  local url="${BASE}${path}"
+  local curl_args=( -sS -w "%{http_code}" -D "$TEMP_HEADERS" -o "$TEMP_IMAGE_BODY" -X GET "$url" )
+
+  if [ -n "$jar" ]; then
+    curl_args+=( -b "$jar" -c "$jar" )
+  fi
+
+  if [ -n "$extra_header" ]; then
+    curl_args+=( -H "$extra_header" )
+  fi
+
+  CODE=$(curl "${curl_args[@]}")
+  BODY=$(cat "$TEMP_IMAGE_BODY")
+}
+
 login() {
   local email="$1"
   local password="$2"
@@ -103,7 +151,7 @@ cleanup() {
 
 on_exit() {
   cleanup
-  rm -f "$ADMIN_JAR" "$READER_JAR" "$RESPONSE_FILE"
+  rm -f "$ADMIN_JAR" "$READER_JAR" "$RESPONSE_FILE" "$TEMP_HEADERS" "$TEMP_IMAGE_BODY" "$TEMP_OVERSIZE" "$TEMP_PLAIN_FILE"
   echo "Result: ${PASS} passed, ${FAIL} failed"
   if [ "$FAIL" -gt 0 ]; then
     exit 1
@@ -113,6 +161,13 @@ on_exit() {
 ADMIN_JAR=$(mktemp)
 READER_JAR=$(mktemp)
 RESPONSE_FILE=$(mktemp)
+TEMP_HEADERS=$(mktemp)
+TEMP_IMAGE_BODY=$(mktemp)
+TEMP_OVERSIZE=$(mktemp)
+TEMP_PLAIN_FILE=$(mktemp)
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+FIXTURE_200="${SCRIPT_DIR}/../test/fixtures/product-200.png"
+FIXTURE_100="${SCRIPT_DIR}/../test/fixtures/product-100.png"
 trap on_exit EXIT
 
 echo "Regression tests against ${BASE}"
@@ -195,8 +250,85 @@ update_payload='{"pname":"Regression Product Updated","description":"temp2","pri
 req PUT "/api/update_product/${TEMP_PRODUCT_ID}" "$update_payload" "$ADMIN_JAR"
 check "admin update product" 200
 
+req GET "/api/products/${TEMP_PRODUCT_ID}/image" "" ""
+check "anonymous GET product image" 401
+
+req_image_get "/api/products/${TEMP_PRODUCT_ID}/image" "$ADMIN_JAR" ""
+check "admin GET product image before upload" 404
+
+req_binary PUT "/api/products/${TEMP_PRODUCT_ID}/image" "$FIXTURE_200" "image/png" "$ADMIN_JAR"
+check "admin PUT product image 200x200 png" 200
+
+EXPECTED_IMAGE_BYTES=$(wc -c < "$FIXTURE_200" | tr -d ' ')
+req_image_get "/api/products/${TEMP_PRODUCT_ID}/image" "$ADMIN_JAR" ""
+if [ "$CODE" = "200" ] && grep -qi '^content-type: image/png' "$TEMP_HEADERS" && [ "$(wc -c < "$TEMP_IMAGE_BODY" | tr -d ' ')" = "$EXPECTED_IMAGE_BYTES" ]; then
+  pass "admin GET product image bytes"
+else
+  fail "admin GET product image bytes"
+  echo "  HTTP $CODE"
+  echo "  Downloaded bytes: $(wc -c < "$TEMP_IMAGE_BODY" | tr -d ' ')"
+fi
+
+req GET "/api/get_product/${TEMP_PRODUCT_ID}" "" "$ADMIN_JAR"
+if [ "$CODE" = "200" ]; then
+  IMAGE_UPDATED_AT=$(node -e 'const j=JSON.parse(process.argv[1]); console.log(j.image_updated_at==null?"":j.image_updated_at);' "$BODY")
+  if [ -n "$IMAGE_UPDATED_AT" ]; then
+    pass "get_product includes image_updated_at"
+  else
+    fail "get_product includes image_updated_at"
+  fi
+else
+  fail "get_product includes image_updated_at (expected HTTP 200, got $CODE)"
+fi
+
+IMAGE_ETAG=$(grep -i '^etag:' "$TEMP_HEADERS" | head -1 | sed 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//' | tr -d '\r')
+req_image_get "/api/products/${TEMP_PRODUCT_ID}/image" "$ADMIN_JAR" "If-None-Match: ${IMAGE_ETAG}"
+check "admin GET product image If-None-Match" 304
+
+login "$READER_EMAIL" "$READER_PASSWORD" "$READER_JAR"
+
+req_image_get "/api/products/${TEMP_PRODUCT_ID}/image" "$READER_JAR" ""
+check "reader GET product image" 200
+
+req_binary PUT "/api/products/${TEMP_PRODUCT_ID}/image" "$FIXTURE_200" "image/png" "$READER_JAR"
+check "reader PUT product image" 403
+
+req DELETE "/api/products/${TEMP_PRODUCT_ID}/image" "" "$READER_JAR"
+check "reader DELETE product image" 403
+
+req_binary PUT "/api/products/${TEMP_PRODUCT_ID}/image" "$FIXTURE_100" "image/png" "$ADMIN_JAR"
+check "admin PUT 100x100 product image" 400 "200 x 200"
+
+req_binary PUT "/api/products/${TEMP_PRODUCT_ID}/image" "$FIXTURE_200" "image/jpeg" "$ADMIN_JAR"
+check "admin PUT png with image/jpeg" 415
+
+printf 'not-an-image' > "$TEMP_PLAIN_FILE"
+req_binary PUT "/api/products/${TEMP_PRODUCT_ID}/image" "$TEMP_PLAIN_FILE" "text/plain" "$ADMIN_JAR"
+check "admin PUT text/plain product image" 415
+
+head -c 210000 /dev/urandom > "$TEMP_OVERSIZE" 2>/dev/null || head -c 210000 /dev/zero > "$TEMP_OVERSIZE"
+req_binary PUT "/api/products/${TEMP_PRODUCT_ID}/image" "$TEMP_OVERSIZE" "image/png" "$ADMIN_JAR"
+check "admin PUT oversize product image" 413
+
+req DELETE "/api/products/${TEMP_PRODUCT_ID}/image" "" "$ADMIN_JAR"
+check "admin DELETE product image" 204
+
+req_image_get "/api/products/${TEMP_PRODUCT_ID}/image" "$ADMIN_JAR" ""
+check "admin GET product image after delete" 404
+
+req DELETE "/api/products/${TEMP_PRODUCT_ID}/image" "" "$ADMIN_JAR"
+check "admin DELETE missing product image" 404
+
+req_binary PUT "/api/products/${TEMP_PRODUCT_ID}/image" "$FIXTURE_200" "image/png" "$ADMIN_JAR"
+check "admin PUT product image before product delete" 200
+
+DELETED_PRODUCT_ID="$TEMP_PRODUCT_ID"
 req DELETE "/api/delete_product/${TEMP_PRODUCT_ID}" "" "$ADMIN_JAR"
-check "admin delete product" 204
+check "admin delete product with image cascade" 204
+
+req_image_get "/api/products/${DELETED_PRODUCT_ID}/image" "$ADMIN_JAR" ""
+check "admin GET image after deleted product" 404
+
 TEMP_PRODUCT_ID=""
 
 req POST "/api/add_product" '{}' "$ADMIN_JAR"

@@ -2,42 +2,38 @@ import "dotenv/config";
 import { Pool } from "pg";
 
 function getConnectionString() {
-  if (!process.env.SUPABASE_DB_URL && !process.env.DATABASE_URL && process.env.DATABBASE_URL) {
-    console.warn("DATABBASE_URL is deprecated, rename it to DATABASE_URL");
-  }
-  const configured = process.env.SUPABASE_DB_URL
-    || process.env.DATABASE_URL
-    || process.env.DATABBASE_URL;
-  if (!configured) {
-    throw new Error("Set DATABASE_URL in backend/.env to your Supabase PostgreSQL connection string.");
+  const configured = process.env.DATABASE_URL;
+  if (!configured || !String(configured).trim()) {
+    throw new Error(
+      "Set DATABASE_URL in backend/.env to your PostgreSQL connection string. "
+      + "If the password contains special characters, percent-encode them in the URL "
+      + "(for example # -> %23, @ -> %40, % -> %25)."
+    );
   }
 
-  const connectionString = configured.trim().replace(/^['"]|['"]$/g, "");
+  const connectionString = String(configured).trim();
   try {
     new URL(connectionString);
-    return connectionString;
   } catch {
-    const schemeEnd = connectionString.indexOf("://");
-    const separator = connectionString.lastIndexOf("@");
-    const userInfoStart = schemeEnd + 3;
-    const userInfo = connectionString.slice(userInfoStart, separator);
-    const passwordSeparator = userInfo.indexOf(":");
-    if (schemeEnd < 0 || separator < userInfoStart || passwordSeparator < 0 || connectionString.includes("%")) {
-      throw new Error("DATABASE_URL must be a valid PostgreSQL connection string.");
-    }
-
-    const username = encodeURIComponent(userInfo.slice(0, passwordSeparator));
-    const password = encodeURIComponent(userInfo.slice(passwordSeparator + 1));
-    const normalized = `${connectionString.slice(0, userInfoStart)}${username}:${password}@${connectionString.slice(separator + 1)}`;
-    try {
-      new URL(normalized);
-      return normalized;
-    } catch {
-      throw new Error("DATABASE_URL must be a valid PostgreSQL connection string.");
-    }
+    throw new Error(
+      "DATABASE_URL must be a valid PostgreSQL connection URL. "
+      + "If the password contains special characters, percent-encode them "
+      + "(for example # -> %23, @ -> %40, % -> %25)."
+    );
   }
+  return connectionString;
 }
 
-const db = new Pool({ connectionString: getConnectionString() });
+function poolSslOption() {
+  if (process.env.DATABASE_SSL === "false") {
+    return false;
+  }
+  return { rejectUnauthorized: false };
+}
+
+const db = new Pool({
+  connectionString: getConnectionString(),
+  ssl: poolSslOption()
+});
 
 export default db;

@@ -43,3 +43,13 @@ alter table public.users enable row level security;
 alter table public.orders enable row level security;
 alter table public.app_accounts enable row level security;
 alter table public.app_sessions enable row level security;
+
+create table if not exists public.product_images (
+  pid bigint primary key references public.products(pid) on delete cascade,
+  mime text not null check (mime in ('image/jpeg','image/png','image/webp')),
+  bytes integer not null check (bytes > 0 and bytes <= 204800),
+  data bytea not null,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.product_images enable row level security;
