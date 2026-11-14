@@ -48,7 +48,7 @@ Use **one Web Service** so the UI and API share one origin (session cookies use 
 
 1. Push the repo to GitHub and connect it in Render, **or** apply `render.yaml` from the repo root.
 2. **Root directory:** `backend`
-3. **Build command:** `npm install && npm run build`
+3. **Build command:** `npm install && npm run build` (the build script installs frontend **dev** dependencies so Vite is available)
 4. **Start command:** `npm start`
 5. **Health check path:** `/api/health`
 6. **Environment variables** (dashboard):
