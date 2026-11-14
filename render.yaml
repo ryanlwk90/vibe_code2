@@ -1,0 +1,20 @@
+# Render Blueprint: one Web Service serves API + Vue build (frontend/dist).
+# Set DATABASE_URL in the Render dashboard (do not commit secrets).
+
+services:
+  - type: web
+    name: lesson4b-store
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: LOGIN_RATE_LIMIT_MAX
+        value: "10"

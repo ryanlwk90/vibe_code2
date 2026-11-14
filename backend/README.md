@@ -35,11 +35,40 @@ Deleting a product removes its image row (`ON DELETE CASCADE`).
 ## Scripts
 
 ```bash
-npm start          # run API
+npm start          # run API (+ serves ../frontend/dist when built)
 npm run dev        # watch mode
+npm run build      # install & build Vue into ../frontend/dist (for Render / production)
 npm run seed       # apply schema.sql and seed data
 npm test           # node --test (image-utils unit tests)
 ```
+
+## Deploy on Render
+
+Use **one Web Service** so the UI and API share one origin (session cookies use `SameSite=Strict`).
+
+1. Push the repo to GitHub and connect it in Render, **or** apply `render.yaml` from the repo root.
+2. **Root directory:** `backend`
+3. **Build command:** `npm install && npm run build`
+4. **Start command:** `npm start`
+5. **Health check path:** `/api/health`
+6. **Environment variables** (dashboard):
+   - `DATABASE_URL` — production Supabase URL (password percent-encoded)
+   - `NODE_ENV` — `production`
+   - `FRONTEND_ORIGIN` — `https://YOUR-SERVICE.onrender.com` (exact public URL, no trailing slash)
+   - Do **not** set `DATABASE_SSL=false` for Supabase.
+
+On first deploy to a new database: run `npm run seed` and `node src/create-admin.js` locally against that `DATABASE_URL` (or use Render Shell if available).
+
+### Local production smoke test
+
+```bash
+cd frontend && npm run build
+cd ../backend
+# stop any server on the same PORT first
+NODE_ENV=production FRONTEND_ORIGIN=http://localhost:3001 npm start
+```
+
+Open `http://localhost:3001` (not the Vite dev port), log in, and check Products / Users / Orders.
 
 Regression API checks (needs running server and `ADMIN_EMAIL` / `ADMIN_PASSWORD`):
 

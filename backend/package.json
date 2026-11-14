@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "build": "npm ci --prefix ../frontend && npm run build --prefix ../frontend",
     "seed": "node src/seed.js",
     "test": "node --test"
   },
